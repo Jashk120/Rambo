@@ -10,8 +10,12 @@ import (
 )
 
 type Config struct {
-	SoftGB float64 `json:"soft_gb"`
-	HardGB float64 `json:"hard_gb"`
+	SoftGB       float64  `json:"soft_gb"`
+	HardGB       float64  `json:"hard_gb"`
+	NetAlertMbps float64  `json:"net_alert_mbps,omitempty"`
+	CPUAlertPct  float64  `json:"cpu_alert_pct,omitempty"`
+	DiskAlertPct float64  `json:"disk_alert_pct,omitempty"`
+	Whitelist    []string `json:"whitelist,omitempty"`
 }
 
 func configPath() string {
@@ -39,7 +43,7 @@ func loadConfig() (Config, error) {
 	return cfg, err
 }
 
-// threshold set --soft 7.5 --hard 7.9
+// threshold set --soft 7.5 --hard 7.9 [--net-alert 900 --cpu-alert 90 --disk-alert 90]
 var thresholdSetCmd = &cobra.Command{
 	Use:   "set",
 	Short: "Set soft and hard RAM thresholds",
@@ -51,7 +55,26 @@ var thresholdSetCmd = &cobra.Command{
 			return fmt.Errorf("soft threshold must be less than hard threshold")
 		}
 
-		cfg := Config{SoftGB: soft, HardGB: hard}
+		cfg, err := loadConfig()
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			cfg = Config{}
+		}
+		cfg.SoftGB = soft
+		cfg.HardGB = hard
+
+		if cmd.Flags().Changed("net-alert") {
+			cfg.NetAlertMbps, _ = cmd.Flags().GetFloat64("net-alert")
+		}
+		if cmd.Flags().Changed("cpu-alert") {
+			cfg.CPUAlertPct, _ = cmd.Flags().GetFloat64("cpu-alert")
+		}
+		if cmd.Flags().Changed("disk-alert") {
+			cfg.DiskAlertPct, _ = cmd.Flags().GetFloat64("disk-alert")
+		}
+
 		if err := saveConfig(cfg); err != nil {
 			return err
 		}
@@ -72,6 +95,18 @@ var thresholdStatusCmd = &cobra.Command{
 		}
 		fmt.Printf("Soft threshold: %.1f GB\n", cfg.SoftGB)
 		fmt.Printf("Hard threshold: %.1f GB\n", cfg.HardGB)
+		if cfg.NetAlertMbps > 0 {
+			fmt.Printf("Network alert:  %.1f MB/s\n", cfg.NetAlertMbps)
+		}
+		if cfg.CPUAlertPct > 0 {
+			fmt.Printf("CPU alert:      %.1f%%\n", cfg.CPUAlertPct)
+		}
+		if cfg.DiskAlertPct > 0 {
+			fmt.Printf("Disk alert:     %.1f%%\n", cfg.DiskAlertPct)
+		}
+		if len(cfg.Whitelist) > 0 {
+			fmt.Printf("Whitelist:      %v\n", cfg.Whitelist)
+		}
 		return nil
 	},
 }
@@ -86,6 +121,9 @@ func init() {
 	// flags on the set subcommand
 	thresholdSetCmd.Flags().Float64("soft", 0, "Soft threshold in GB (notification)")
 	thresholdSetCmd.Flags().Float64("hard", 0, "Hard threshold in GB (auto-kill)")
+	thresholdSetCmd.Flags().Float64("net-alert", 0, "Notify if any interface exceeds this rx+tx (MB/s, 0 = off)")
+	thresholdSetCmd.Flags().Float64("cpu-alert", 0, "Notify if overall CPU usage exceeds this percent (0 = off)")
+	thresholdSetCmd.Flags().Float64("disk-alert", 0, "Notify if any mount exceeds this used percent (0 = off)")
 	thresholdSetCmd.MarkFlagRequired("soft")
 	thresholdSetCmd.MarkFlagRequired("hard")
 

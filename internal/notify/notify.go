@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 )
+
 func Send(title, body string) {
 	// try notify-send (GNOME, KDE, most DEs)
 	if err := exec.Command("notify-send", title, body).Run(); err == nil {
