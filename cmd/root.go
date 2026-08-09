@@ -9,8 +9,10 @@ import (
 
 var rootCmd = &cobra.Command{
 	Use:   "rambo",
-	Short: "Userspace RAM manager with auto-kill",
-	Long:  "Rambo monitors RAM usage, notifies on soft threshold, and auto-kills on hard threshold.",
+	Short: "Event-driven system monitor with auto-kill",
+	Long: "Rambo watches RAM (via cgroup v2 limits), temperature, pressure, " +
+		"network, CPU and disk using kernel-backed sources, and acts on " +
+		"configurable policies.",
 }
 
 func Execute() {
@@ -18,4 +20,15 @@ func Execute() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func init() {
+	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(thresholdCmd)
+	rootCmd.AddCommand(protectCmd)
+	rootCmd.AddCommand(whitelistCmd)
+	rootCmd.AddCommand(historyCmd)
+	rootCmd.AddCommand(topCmd)
+	rootCmd.AddCommand(statsCmd)
+	rootCmd.AddCommand(cleanCmd)
 }

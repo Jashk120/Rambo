@@ -1,134 +1,123 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
+	"github.com/jashk120/rambo/internal/config"
 	"github.com/spf13/cobra"
 )
 
-type Config struct {
-	SoftGB       float64  `json:"soft_gb"`
-	HardGB       float64  `json:"hard_gb"`
-	NetAlertMbps float64  `json:"net_alert_mbps,omitempty"`
-	CPUAlertPct  float64  `json:"cpu_alert_pct,omitempty"`
-	DiskAlertPct float64  `json:"disk_alert_pct,omitempty"`
-	Whitelist    []string `json:"whitelist,omitempty"`
-}
-
-func configPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "rambo", "config.json")
-}
-
-func saveConfig(cfg Config) error {
-	path := configPath()
-	os.MkdirAll(filepath.Dir(path), 0755)
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func loadConfig() (Config, error) {
-	data, err := os.ReadFile(configPath())
-	if err != nil {
-		return Config{}, err
-	}
-	var cfg Config
-	err = json.Unmarshal(data, &cfg)
-	return cfg, err
-}
-
-// threshold set --soft 7.5 --hard 7.9 [--net-alert 900 --cpu-alert 90 --disk-alert 90]
 var thresholdSetCmd = &cobra.Command{
 	Use:   "set",
-	Short: "Set soft and hard RAM thresholds",
+	Short: "Set memory thresholds and alert levels",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		soft, _ := cmd.Flags().GetFloat64("soft")
-		hard, _ := cmd.Flags().GetFloat64("hard")
-
-		if soft >= hard {
-			return fmt.Errorf("soft threshold must be less than hard threshold")
-		}
-
-		cfg, err := loadConfig()
+		cfg, err := config.Load()
 		if err != nil {
-			if !os.IsNotExist(err) {
-				return err
-			}
-			cfg = Config{}
-		}
-		cfg.SoftGB = soft
-		cfg.HardGB = hard
-
-		if cmd.Flags().Changed("net-alert") {
-			cfg.NetAlertMbps, _ = cmd.Flags().GetFloat64("net-alert")
-		}
-		if cmd.Flags().Changed("cpu-alert") {
-			cfg.CPUAlertPct, _ = cmd.Flags().GetFloat64("cpu-alert")
-		}
-		if cmd.Flags().Changed("disk-alert") {
-			cfg.DiskAlertPct, _ = cmd.Flags().GetFloat64("disk-alert")
-		}
-
-		if err := saveConfig(cfg); err != nil {
 			return err
 		}
+		total := config.TotalRAMKB()
+		totalGB := float64(total) / 1048576
 
-		fmt.Printf("Thresholds set — soft: %.1f GB, hard: %.1f GB\n", soft, hard)
+		softPct, _ := cmd.Flags().GetFloat64("soft-pct")
+		hardPct, _ := cmd.Flags().GetFloat64("hard-pct")
+		maxPct, _ := cmd.Flags().GetFloat64("max-pct")
+
+		if cmd.Flags().Changed("soft") {
+			g, _ := cmd.Flags().GetFloat64("soft")
+			softPct = g / totalGB * 100
+		}
+		if cmd.Flags().Changed("hard") {
+			g, _ := cmd.Flags().GetFloat64("hard")
+			hardPct = g / totalGB * 100
+		}
+		if cmd.Flags().Changed("max") {
+			g, _ := cmd.Flags().GetFloat64("max")
+			maxPct = g / totalGB * 100
+		}
+
+		if softPct >= hardPct {
+			return fmt.Errorf("soft threshold must be less than hard threshold")
+		}
+		cfg.Memory.SoftPct = softPct
+		cfg.Memory.HardPct = hardPct
+		if maxPct > 0 {
+			if hardPct >= maxPct {
+				return fmt.Errorf("max threshold must be greater than hard threshold")
+			}
+			cfg.Memory.MaxPct = maxPct
+		}
+
+		if cmd.Flags().Changed("net-alert") {
+			cfg.Network.AlertMBps, _ = cmd.Flags().GetFloat64("net-alert")
+		}
+		if cmd.Flags().Changed("cpu-alert") {
+			cfg.CPU.AlertPct, _ = cmd.Flags().GetFloat64("cpu-alert")
+		}
+		if cmd.Flags().Changed("disk-alert") {
+			cfg.Disk.SpaceAlertPct, _ = cmd.Flags().GetFloat64("disk-alert")
+		}
+		if cmd.Flags().Changed("temp-kill") {
+			cfg.Temperature.Critical, _ = cmd.Flags().GetFloat64("temp-kill")
+		}
+
+		if err := config.Save(config.Path(), cfg); err != nil {
+			return err
+		}
+		fmt.Printf("Thresholds set — soft %.0f%% (%.1fG), hard %.0f%% (%.1fG), max %.0f%% (%.1fG)\n",
+			cfg.Memory.SoftPct, gbpct(total, cfg.Memory.SoftPct),
+			cfg.Memory.HardPct, gbpct(total, cfg.Memory.HardPct),
+			cfg.Memory.MaxPct, gbpct(total, cfg.Memory.MaxPct))
 		return nil
 	},
 }
 
-// threshold status
 var thresholdStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show current thresholds",
+	Short: "Show current thresholds and alerts",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig()
+		cfg, err := config.Load()
 		if err != nil {
-			return fmt.Errorf("no config found, run 'rambo threshold set' first")
+			return err
 		}
-		fmt.Printf("Soft threshold: %.1f GB\n", cfg.SoftGB)
-		fmt.Printf("Hard threshold: %.1f GB\n", cfg.HardGB)
-		if cfg.NetAlertMbps > 0 {
-			fmt.Printf("Network alert:  %.1f MB/s\n", cfg.NetAlertMbps)
+		total := config.TotalRAMKB()
+		fmt.Printf("Soft threshold:  %.0f%% (%.1f GB)\n", cfg.Memory.SoftPct, gbpct(total, cfg.Memory.SoftPct))
+		fmt.Printf("Hard threshold:  %.0f%% (%.1f GB)\n", cfg.Memory.HardPct, gbpct(total, cfg.Memory.HardPct))
+		fmt.Printf("Kernel max:      %.0f%% (%.1f GB)\n", cfg.Memory.MaxPct, gbpct(total, cfg.Memory.MaxPct))
+		fmt.Printf("Temp kill:       %.0f C\n", cfg.Temperature.Critical)
+		if cfg.Network.AlertMBps > 0 {
+			fmt.Printf("Network alert:   %.1f MB/s\n", cfg.Network.AlertMBps)
 		}
-		if cfg.CPUAlertPct > 0 {
-			fmt.Printf("CPU alert:      %.1f%%\n", cfg.CPUAlertPct)
+		if cfg.CPU.AlertPct > 0 {
+			fmt.Printf("CPU alert:       %.1f%%\n", cfg.CPU.AlertPct)
 		}
-		if cfg.DiskAlertPct > 0 {
-			fmt.Printf("Disk alert:     %.1f%%\n", cfg.DiskAlertPct)
+		if cfg.Disk.SpaceAlertPct > 0 {
+			fmt.Printf("Disk space alert: %.1f%%\n", cfg.Disk.SpaceAlertPct)
 		}
-		if len(cfg.Whitelist) > 0 {
-			fmt.Printf("Whitelist:      %v\n", cfg.Whitelist)
-		}
+		fmt.Printf("Kill policy:     %s (cooldown %s, max %d/min)\n", cfg.Kill.Policy, cfg.Kill.Cooldown, cfg.Kill.MaxPerMin)
+		fmt.Printf("Protect:         %v\n", cfg.Protect)
+		fmt.Printf("Expendable:      %v\n", cfg.Expendable)
+		fmt.Printf("Config:          %s\n", config.Path())
 		return nil
 	},
 }
 
-// threshold (parent command)
 var thresholdCmd = &cobra.Command{
 	Use:   "threshold",
-	Short: "Manage RAM thresholds",
+	Short: "Manage memory thresholds",
 }
 
 func init() {
-	// flags on the set subcommand
 	thresholdSetCmd.Flags().Float64("soft", 0, "Soft threshold in GB (notification)")
 	thresholdSetCmd.Flags().Float64("hard", 0, "Hard threshold in GB (auto-kill)")
+	thresholdSetCmd.Flags().Float64("max", 0, "Kernel safety-net limit in GB")
+	thresholdSetCmd.Flags().Float64("soft-pct", 90, "Soft threshold as % of total RAM")
+	thresholdSetCmd.Flags().Float64("hard-pct", 96, "Hard threshold as % of total RAM")
+	thresholdSetCmd.Flags().Float64("max-pct", 99, "Kernel max as % of total RAM")
 	thresholdSetCmd.Flags().Float64("net-alert", 0, "Notify if any interface exceeds this rx+tx (MB/s, 0 = off)")
 	thresholdSetCmd.Flags().Float64("cpu-alert", 0, "Notify if overall CPU usage exceeds this percent (0 = off)")
 	thresholdSetCmd.Flags().Float64("disk-alert", 0, "Notify if any mount exceeds this used percent (0 = off)")
-	thresholdSetCmd.MarkFlagRequired("soft")
-	thresholdSetCmd.MarkFlagRequired("hard")
+	thresholdSetCmd.Flags().Float64("temp-kill", 0, "Kill top consumer above this temperature (C, 0 = off)")
 
-	// wire up: root → threshold → set/status
 	thresholdCmd.AddCommand(thresholdSetCmd)
 	thresholdCmd.AddCommand(thresholdStatusCmd)
-	rootCmd.AddCommand(thresholdCmd)
 }

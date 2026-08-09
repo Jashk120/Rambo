@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jashk120/rambo/internal/monitor"
+	"github.com/jashk120/rambo/internal/pressure"
+	"github.com/jashk120/rambo/internal/temp"
 	"github.com/spf13/cobra"
 )
 
@@ -125,6 +127,18 @@ func runTop() error {
 	}
 	drawBox("Disk Space", spaceLines)
 
+	// Temperature
+	if tmax, where, err := temp.Max(temp.ScanSensors(nil)); err == nil && tmax > 0 {
+		drawBox("Temperature", []string{fmt.Sprintf("%-10s %5.1f C", where, tmax)})
+	}
+
+	// Memory pressure (PSI)
+	if p, err := pressure.Read("memory"); err == nil {
+		drawBox("Memory Pressure (PSI)", []string{
+			fmt.Sprintf("some %.1f%%  full %.1f%%  (avg10)", p.Some10, p.Full10),
+		})
+	}
+
 	// Top RAM consumers
 	procLines := []string{fmt.Sprintf("%-8s %-20s %s", "PID", "NAME", "RAM")}
 	for _, p := range procs {
@@ -152,8 +166,4 @@ func drawBox(title string, lines []string) {
 	}
 	fmt.Printf("  └%s┘\n", strings.Repeat("─", inner+2))
 	fmt.Println()
-}
-
-func init() {
-	rootCmd.AddCommand(topCmd)
 }

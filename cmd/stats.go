@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jashk120/rambo/internal/monitor"
+	"github.com/jashk120/rambo/internal/pressure"
+	"github.com/jashk120/rambo/internal/temp"
 	"github.com/spf13/cobra"
 )
 
@@ -104,11 +106,25 @@ var statsCmd = &cobra.Command{
 					d.Mount, d.UsedGB, d.TotalGB, d.UsedPct))
 			}
 
+			// Temperature
+			tempLines := []string{"No sensors"}
+			if tmax, where, err := temp.Max(temp.ScanSensors(nil)); err == nil && tmax > 0 {
+				tempLines = []string{fmt.Sprintf("%-10s %5.1f C", where, tmax)}
+			}
+
+			// Memory pressure (PSI)
+			psiLines := []string{"No PSI data"}
+			if p, err := pressure.Read("memory"); err == nil {
+				psiLines = []string{fmt.Sprintf("some %.1f%%  full %.1f%%  (avg10)", p.Some10, p.Full10)}
+			}
+
 			fmt.Print("\033[2J\033[H")
 			fmt.Println("rambo stats — Ctrl+C to exit")
 			fmt.Println()
 			drawBox("RAM", ramLines)
 			drawBox("CPU", cpuLines)
+			drawBox("Temperature", tempLines)
+			drawBox("Memory Pressure (PSI)", psiLines)
 			drawBox("Network", netLines)
 			drawBox("Disk I/O", ioLines)
 			drawBox("Disk Space", spaceLines)
@@ -116,8 +132,4 @@ var statsCmd = &cobra.Command{
 			time.Sleep(time.Duration(intervalSec) * time.Second)
 		}
 	},
-}
-
-func init() {
-	rootCmd.AddCommand(statsCmd)
 }

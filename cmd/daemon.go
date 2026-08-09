@@ -1,181 +1,265 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
-	"github.com/jashk120/rambo/internal/killer"
+	"github.com/jashk120/rambo/internal/battery"
+	"github.com/jashk120/rambo/internal/config"
+	"github.com/jashk120/rambo/internal/cpu"
+	"github.com/jashk120/rambo/internal/disk"
+	"github.com/jashk120/rambo/internal/kill"
+	"github.com/jashk120/rambo/internal/memory"
 	"github.com/jashk120/rambo/internal/monitor"
+	"github.com/jashk120/rambo/internal/netwatch"
 	"github.com/jashk120/rambo/internal/notify"
+	"github.com/jashk120/rambo/internal/oom"
+	"github.com/jashk120/rambo/internal/policy"
+	"github.com/jashk120/rambo/internal/pressure"
+	"github.com/jashk120/rambo/internal/state"
+	"github.com/jashk120/rambo/internal/temp"
+	"github.com/jashk120/rambo/internal/watcher"
 	"github.com/spf13/cobra"
 )
 
 var daemonCmd = &cobra.Command{
 	Use:   "daemon",
-	Short: "Start the rambo background daemon",
+	Short: "Start the rambo event-driven monitor daemon",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig()
-		if err != nil {
-			return fmt.Errorf("no config found, run 'rambo threshold set' first")
+		return runDaemon()
+	},
+}
+
+func runDaemon() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	emit := make(chan watcher.Event, 128)
+	var watchers []watcher.Watcher
+
+	mw, err := memory.NewWatcher(cfg)
+	if err != nil {
+		fmt.Printf("[rambo] memory watcher disabled: %v\n", err)
+	} else {
+		watchers = append(watchers, mw)
+	}
+
+	tw := temp.NewWatcher(cfg)
+	watchers = append(watchers, tw)
+	pw := pressure.NewWatcher(cfg)
+	watchers = append(watchers, pw)
+	nw := netwatch.NewWatcher(cfg)
+	watchers = append(watchers, nw)
+	cw := cpu.NewWatcher(cfg)
+	watchers = append(watchers, cw)
+	dw := disk.NewWatcher(cfg)
+	watchers = append(watchers, dw)
+	bw := battery.NewWatcher(cfg, "/sys/class/power_supply")
+	if bw.Enabled() {
+		watchers = append(watchers, bw)
+	}
+
+	for _, w := range watchers {
+		w := w
+		go func() { _ = w.Run(ctx, emit) }()
+	}
+
+	totalKB := config.TotalRAMKB()
+	coord := kill.NewCoordinator(cfg, totalKB*1024)
+
+	oomMgr := oom.New(cfg.Expendable)
+	if cfg.Kill.OOMPrefer {
+		n := oomMgr.MarkExpendable()
+		if n > 0 {
+			fmt.Printf("[rambo] marked %d expendable processes as OOM-preferred\n", n)
 		}
-
-		fmt.Printf("[rambo] daemon started — soft: %.1f GB, hard: %.1f GB\n", cfg.SoftGB, cfg.HardGB)
-
-		softKB := uint64(cfg.SoftGB * 1024 * 1024)
-		hardKB := uint64(cfg.HardGB * 1024 * 1024)
-		softTriggered := false
-		hardTriggered := false
-
-		intervalSec := 5.0
-		ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
-		defer ticker.Stop()
-
-		// initialise prev snapshots before the loop
-		prevNet, err := monitor.SnapshotNet()
-		if err != nil {
-			prevNet = nil
-		}
-		prevIO, err := monitor.SnapshotDiskIO()
-		if err != nil {
-			prevIO = nil
-		}
-		var prevCPU struct {
-			Overall monitor.CPURaw
-			PerCore []monitor.CPURaw
-		}
-		if o, c, err := monitor.ReadCPURaw(); err == nil {
-			prevCPU.Overall = o
-			prevCPU.PerCore = c
-		}
-
-		cpuPct := 0.0
-
-		for range ticker.C {
-			// RAM
-			mem, memErr := monitor.GetMemInfo()
-			if memErr == nil {
-				if mem.Used >= hardKB && !hardTriggered {
-					hardTriggered = true
-					softTriggered = true
-					usedMB := mem.Used / 1024
-					totalMB := mem.Total / 1024
-
-					notify.Send(
-						"⚠️ RAMBO: Hard threshold hit",
-						fmt.Sprintf("RAM at %d/%d MB — killing top consumer", usedMB, totalMB),
-					)
-					killer.LoadWhitelist(cfg.Whitelist)
-					name, pid, err := killer.KillTopConsumer()
-					if err != nil {
-						notify.Send("RAMBO: Kill failed", err.Error())
-					} else {
-						notify.Send(
-							"RAMBO: Process killed",
-							fmt.Sprintf("Killed %s (PID %d)", name, pid),
-						)
-						logKill(name, pid)
-					}
-				} else if mem.Used >= softKB && !softTriggered {
-					softTriggered = true
-					usedMB := mem.Used / 1024
-					totalMB := mem.Total / 1024
-					notify.Send(
-						"⚡ RAMBO: Soft threshold hit",
-						fmt.Sprintf("RAM at %d/%d MB — approaching limit", usedMB, totalMB),
-					)
-				} else if mem.Used < softKB {
-					softTriggered = false
-					hardTriggered = false
+		oomTicker := time.NewTicker(time.Minute)
+		defer oomTicker.Stop()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-oomTicker.C:
+					oomMgr.MarkExpendable()
 				}
 			}
+		}()
+	}
 
-			// Network
-			netStats, newNet, _ := monitor.GetIfaceStats(prevNet, intervalSec)
-			prevNet = newNet
-			if cfg.NetAlertMbps > 0 {
-				for _, iface := range netStats {
-					totalMBps := (iface.RxBytesPerSec + iface.TxBytesPerSec) / 1e6
-					if totalMBps > cfg.NetAlertMbps {
-						notify.Send(
-							"⚡ RAMBO: High network",
-							fmt.Sprintf("%s: %.1f MB/s", iface.Name, totalMBps),
-						)
-					}
-				}
-			}
+	fmt.Printf("[rambo] daemon started — soft %.0f%% (%.1fG) | hard %.0f%% (%.1fG) | max %.0f%% (%.1fG) | temp kill %.0fC\n",
+		cfg.Memory.SoftPct, gbpct(totalKB, cfg.Memory.SoftPct),
+		cfg.Memory.HardPct, gbpct(totalKB, cfg.Memory.HardPct),
+		cfg.Memory.MaxPct, gbpct(totalKB, cfg.Memory.MaxPct),
+		cfg.Temperature.Critical)
+	if mw != nil && len(mw.LimitDirs()) > 0 {
+		fmt.Printf("[rambo] kernel limits applied on: %s\n", strings.Join(mw.LimitDirs(), ", "))
+	} else {
+		fmt.Println("[rambo] warning: no writable session cgroup — kernel enforcement off, monitoring from meminfo")
+	}
+	if !bw.Enabled() {
+		fmt.Println("[rambo] no battery found — battery protection off")
+	}
 
-			// CPU
-			curOverall, curPerCore, err := monitor.ReadCPURaw()
+	statusC := time.NewTicker(1 * time.Second)
+	defer statusC.Stop()
+	prevNet, _ := monitor.SnapshotNet()
+	var prevCPU struct {
+		Overall monitor.CPURaw
+		PerCore []monitor.CPURaw
+	}
+	if o, c, err := monitor.ReadCPURaw(); err == nil {
+		prevCPU.Overall = o
+		prevCPU.PerCore = c
+	}
+	cpuPct := 0.0
+
+	for {
+		select {
+		case ev := <-emit:
+			handleEvent(cfg, coord, oomMgr, ev)
+		case <-statusC.C:
+			mem, _ := monitor.GetMemInfo()
+			curO, curC, err := monitor.ReadCPURaw()
 			if err == nil {
-				curCPU := struct {
+				cur := struct {
 					Overall monitor.CPURaw
 					PerCore []monitor.CPURaw
-				}{curOverall, curPerCore}
-				cpuStats := monitor.CalcCPUStats(prevCPU, curCPU)
-				prevCPU = curCPU
-				cpuPct = cpuStats.Overall
-				if cfg.CPUAlertPct > 0 && cpuStats.Overall > cfg.CPUAlertPct {
-					notify.Send("⚡ RAMBO: High CPU", fmt.Sprintf("CPU at %.1f%%", cpuStats.Overall))
-				}
+				}{curO, curC}
+				cpuPct = monitor.CalcCPUStats(prevCPU, cur).Overall
+				prevCPU = cur
 			}
-
-			// Disk I/O (log only, no kill action)
-			ioStats, newIO, _ := monitor.GetDiskIOStats(prevIO, intervalSec)
-			prevIO = newIO
-
-			// Disk Space
-			spaceStats, _ := monitor.GetDiskSpaceInfo()
-			if cfg.DiskAlertPct > 0 {
-				for _, d := range spaceStats {
-					if d.UsedPct > cfg.DiskAlertPct {
-						notify.Send(
-							"⚡ RAMBO: Disk nearly full",
-							fmt.Sprintf("%s at %.1f%%", d.Mount, d.UsedPct),
-						)
-					}
-				}
-			}
-
-			// periodic status line to stdout (shows up in journalctl)
-			usedMB, totalMB := uint64(0), uint64(0)
-			if memErr == nil {
-				usedMB = mem.Used / 1024
-				totalMB = mem.Total / 1024
-			}
+			netStats, newNet, _ := monitor.GetIfaceStats(prevNet, 1.0)
+			prevNet = newNet
 			netLine := "-"
 			if len(netStats) > 0 {
 				top := netStats[0]
-				netLine = fmt.Sprintf("%s ↓%.1fMB/s ↑%.1fMB/s",
-					top.Name, top.RxBytesPerSec/1e6, top.TxBytesPerSec/1e6)
+				netLine = fmt.Sprintf("%s ↓%.1f ↑%.1fMB/s", top.Name, top.RxBytesPerSec/1e6, top.TxBytesPerSec/1e6)
 			}
-			ioLine := "-"
-			if len(ioStats) > 0 {
-				top := ioStats[0]
-				ioLine = fmt.Sprintf("%s R%.1f W%.1fMB/s", top.Device, top.ReadMBPerSec, top.WriteMBPerSec)
+			tempLine := "-"
+			if tmax, where := tw.MaxTemp(); tmax > 0 {
+				tempLine = fmt.Sprintf("%s %.0fC", where, tmax)
 			}
-			fmt.Printf("[rambo] RAM %dMB/%dMB | CPU %.1f%% | net %s | io %s\n", usedMB, totalMB, cpuPct, netLine, ioLine)
+			psiLine := "-"
+			if p, err := pressure.Read("memory"); err == nil {
+				psiLine = fmt.Sprintf("some %.1f%% full %.1f%%", p.Some10, p.Full10)
+			}
+			fmt.Printf("[rambo] RAM %.1f/%.1fG (%.0f%%) | CPU %.1f%% | temp %s | net %s | psi %s\n",
+				float64(mem.Used)/1048576, float64(mem.Total)/1048576,
+				percent(mem.Used, mem.Total), cpuPct, tempLine, netLine, psiLine)
+		case <-ctx.Done():
+			if mw != nil {
+				mw.Restore()
+			}
+			oomMgr.Reset()
+			fmt.Println("[rambo] daemon stopped — cgroup limits restored")
+			return nil
 		}
+	}
+}
 
-		return nil
-	},
+func handleEvent(cfg config.Config, coord *kill.Coordinator, oomMgr *oom.Manager, ev watcher.Event) {
+	act := policy.Resolve(cfg, ev)
+	rec := state.Record{
+		Time:     ev.Time.Format("2006-01-02 15:04:05"),
+		Source:   ev.Source,
+		Severity: ev.Severity.String(),
+		Action:   act.String(),
+		Message:  ev.Message,
+		Values:   ev.Values,
+	}
+
+	switch act {
+	case policy.ActionNotify:
+		notify.Send(title(ev), ev.Message)
+	case policy.ActionKill:
+		if !coord.CanKill() {
+			msg := fmt.Sprintf("kill throttled (cooldown %s): %s", coord.CooldownRemaining().Round(time.Second), ev.Message)
+			notify.Send("RAMBO: kill throttled", msg)
+			rec.Action = "throttled"
+			rec.Message = msg
+			break
+		}
+		victim, err := coord.PickVictim()
+		if err != nil {
+			notify.Send(title(ev), "no killable process: "+err.Error())
+			rec.Action = "kill_failed"
+			rec.Message = "kill failed: " + err.Error()
+			break
+		}
+		if err := coord.Kill(victim); err != nil {
+			notify.Send(title(ev), fmt.Sprintf("kill of %s (PID %d) failed: %v", victim.Name, victim.PID, err))
+			rec.Action = "kill_failed"
+			rec.Process = victim.Name
+			rec.PID = victim.PID
+			rec.Message = "kill failed: " + err.Error()
+			break
+		}
+		coord.RecordKill()
+		if cfg.Kill.OOMPrefer {
+			oomMgr.MarkVictim(victim)
+		}
+		msg := fmt.Sprintf("Killed %s (PID %d, %.0f%% CPU, %d MB RSS) — %s",
+			victim.Name, victim.PID, victim.CPU, victim.RSS/1048576, ev.Message)
+		notify.Send(title(ev), msg)
+		logKill(victim.Name, victim.PID)
+		rec.Process = victim.Name
+		rec.PID = victim.PID
+		rec.Message = ev.Message
+	case policy.ActionSuspend:
+		n := coord.SuspendHeavy(2)
+		notify.Send("RAMBO: low battery", fmt.Sprintf("Suspended %d heavy processes", n))
+		rec.Message = fmt.Sprintf("suspended %d processes", n)
+	case policy.ActionResume:
+		n := coord.ResumeSuspended()
+		if n > 0 {
+			notify.Send("RAMBO: charging", fmt.Sprintf("Resumed %d suspended processes", n))
+		}
+		rec.Message = fmt.Sprintf("resumed %d processes", n)
+	case policy.ActionNone:
+		return
+	}
+	_ = state.Append(rec)
+}
+
+func title(ev watcher.Event) string {
+	return fmt.Sprintf("RAMBO: %s (%s)", strings.ToUpper(ev.Source), ev.Severity)
+}
+
+func gb(kb uint64) float64 {
+	return float64(kb) / 1048576
+}
+
+func gbpct(kb uint64, pct float64) float64 {
+	return float64(kb) * pct / 100 / 1048576
+}
+
+func percent(part, total uint64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) / float64(total) * 100
 }
 
 func logKill(name string, pid int) {
 	home, _ := os.UserHomeDir()
 	path := filepath.Join(home, ".local", "share", "rambo", "rambo.log")
-	os.MkdirAll(filepath.Dir(path), 0755)
-
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-
-	fmt.Fprintf(f, "[%s] killed %s (PID %d)\n",
-		time.Now().Format("2006-01-02 15:04:05"), name, pid)
-}
-func init() {
-	rootCmd.AddCommand(daemonCmd)
+	fmt.Fprintf(f, "[%s] killed %s (PID %d)\n", time.Now().Format("2006-01-02 15:04:05"), name, pid)
 }

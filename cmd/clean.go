@@ -29,7 +29,3 @@ var cleanCmd = &cobra.Command{
 		return nil
 	},
 }
-
-func init() {
-	rootCmd.AddCommand(cleanCmd)
-}
