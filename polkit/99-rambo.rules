@@ -1,0 +1,14 @@
+// Allow rambo's privileged oom-protect helper to run passwordlessly via
+// pkexec. The rule matches only the `rambo oom-protect` invocation, so it
+// grants nothing else. The helper only writes oom_score_adj=-1000 on
+// protected processes; it never kills.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec") {
+        var program = action.lookup("program");
+        var args = action.lookup("arguments");
+        if (program && program.split("/").pop() == "rambo" &&
+            args && args.split(" ")[0] == "oom-protect") {
+            return polkit.Result.YES;
+        }
+    }
+});

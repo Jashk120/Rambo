@@ -17,9 +17,9 @@ import (
 //
 // Raising oom_score_adj is permitted for a same-uid process without extra
 // capabilities. Lowering it (to protect a process) requires CAP_SYS_RESOURCE,
-// so protecting processes from the kernel OOM killer is NOT possible from an
-// unprivileged daemon — the protect list still fully protects from rambo's own
-// SIGTERM kills.
+// so the daemon itself cannot protect anything from the kernel OOM killer —
+// the privileged `oom-protect` helper (run via pkexec) does that, and the
+// protect list still fully protects from rambo's own SIGTERM kills.
 type Manager struct {
 	mu         sync.Mutex
 	marked     map[int]int // pid -> original oom_score_adj
@@ -86,6 +86,47 @@ func (m *Manager) Reset() {
 	m.marked = map[int]int{}
 }
 
+// ProtectSelf sets the calling process's oom_score_adj to -1000, making the
+// kernel OOM killer never choose it. Lowering below the current value requires
+// CAP_SYS_RESOURCE, so this fails (EPERM) for an unprivileged process.
+func ProtectSelf() error {
+	return os.WriteFile("/proc/self/oom_score_adj", []byte("-1000"), 0o644)
+}
+
+// ProtectNames best-effort sets oom_score_adj to -1000 on every running
+// process whose name is in names, so the kernel OOM killer never chooses them.
+// Returns the number of processes newly protected. Requires CAP_SYS_RESOURCE
+// (root) to succeed; unprivileged calls quietly return 0.
+func ProtectNames(names []string) int {
+	if len(names) == 0 {
+		return 0
+	}
+	set := make(map[string]bool, len(names))
+	for _, s := range names {
+		if s != "" {
+			set[s] = true
+		}
+	}
+	entries, err := filepath.Glob("/proc/[0-9]*/status")
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, path := range entries {
+		pid, err := strconv.Atoi(filepath.Base(filepath.Dir(path)))
+		if err != nil {
+			continue
+		}
+		if !set[procName(path)] {
+			continue
+		}
+		if protect(pid) {
+			count++
+		}
+	}
+	return count
+}
+
 func (m *Manager) raise(pid int) bool {
 	path := fmt.Sprintf("/proc/%d/oom_score_adj", pid)
 	cur, err := os.ReadFile(path)
@@ -104,6 +145,18 @@ func (m *Manager) raise(pid int) bool {
 	m.marked[pid] = orig
 	m.mu.Unlock()
 	return true
+}
+
+func protect(pid int) bool {
+	path := fmt.Sprintf("/proc/%d/oom_score_adj", pid)
+	cur, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if strings.TrimSpace(string(cur)) == "-1000" {
+		return false // already protected
+	}
+	return os.WriteFile(path, []byte("-1000"), 0o644) == nil
 }
 
 func procName(statusPath string) string {

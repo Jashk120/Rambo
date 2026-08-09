@@ -45,6 +45,7 @@ cp ./rambo ~/.local/bin/rambo
 | `rambo stats` | Live dashboard (Ctrl+C to exit) |
 | `rambo threshold set/status` | Set memory thresholds and alert levels |
 | `rambo protect add/remove/list` | Protect processes from being killed |
+| `rambo oom-protect` | Privileged helper (via pkexec): set `oom_score_adj=-1000` on protected processes |
 | `rambo history` | Show past events and kills with reasons |
 | `rambo clean` | Delete the log file |
 
@@ -91,6 +92,7 @@ policy      = "score"      # "score" or "rss"
 cooldown    = "30s"        # min interval between kills
 max_per_min = 3            # rate limit
 oom_prefer  = true         # steer the kernel OOM killer toward rambo's picks
+oom_protect = true         # shield protected processes from the kernel OOM killer
 
 [kill.weights]
 rss     = 0.6              # kill score weights
@@ -146,9 +148,32 @@ Set `policy = "rss"` for the old "biggest process" behavior.
 The kernel picks OOM victims by `oom_score_adj`. Rambo cannot replace the kernel OOM killer, but with `kill.oom_prefer = true` it steers it:
 
 - **Preferred victims**: each process rambo chooses to kill is marked `oom_score_adj = 1000` (the kernel's #1 choice) before the `SIGTERM`, and every process in the `expendable` list is kept marked — so if the kernel OOM-kills anyway, it takes rambo's pick first. Raising `oom_score_adj` needs no privileges.
-- **Protecting processes from the kernel**: NOT possible from an unprivileged daemon. Lowering `oom_score_adj` (to make a process unkillable) requires `CAP_SYS_RESOURCE`. The `protect` list fully shields processes from *rambo's own* kills; for kernel-OOM protection a privileged helper would be needed.
+- **Protecting processes from the kernel**: with `kill.oom_protect = true` (default), the daemon asks a root helper (`rambo oom-protect`, run through `pkexec`) to lower `oom_score_adj` to `-1000` on the internal blacklist, the `protect` list, and rambo itself — the kernel OOM killer then never chooses them. Lowering below 0 requires `CAP_SYS_RESOURCE`, which is why this runs as root. See [Hardening](#hardening) to install the polkit rule; without it the daemon simply logs a warning and keeps running unprivileged.
 
-Caveat: once a process is marked `1000` it stays marked for the process lifetime (only root, a restart, or the process exiting clears it) — which is why only expendable processes and active kill victims are ever marked.
+Caveat: once a process is marked `1000` it stays marked for the process lifetime (only root, a restart, or the process exiting clears it) — which is why only expendable processes and active kill victims are ever marked. Likewise, a `-1000` protection persists until the process exits or root clears it.
+
+## Hardening
+
+The daemon itself stays unprivileged — only a narrow helper runs as root. With `kill.oom_protect = true` (default), the daemon invokes `pkexec rambo oom-protect` on start and every 5 minutes. That helper sets `oom_score_adj = -1000` (unkillable by the kernel OOM killer) on the internal blacklist, the `protect` list, and rambo itself. It only writes `oom_score_adj`; it never kills, so running it as root carries no kill blast radius.
+
+To let the passwordless helper through, install the polkit rule once (as root):
+
+```sh
+sudo cp polkit/99-rambo.rules /etc/polkit-1/rules.d/
+sudo systemctl restart polkit   # or reboot; not required on all distros
+systemctl --user restart rambo.service
+```
+
+The rule matches only the exact `rambo oom-protect` invocation (`program` basename `rambo` + first argument `oom-protect`) and grants nothing else.
+
+Verify protected processes are now -1000 (rambo itself may show up as the daemon):
+
+```sh
+cat /proc/$(pgrep -x kwin_wayland)/oom_score_adj   # → -1000
+cat /proc/$(pgrep -x rambo)/oom_score_adj          # → -1000
+```
+
+Without the rule, the daemon logs `oom-protect: helper failed` and keeps running — kernel protection is simply off. Protection persists for each protected process's lifetime and is re-applied on the 5-minute cadence to catch newly started ones.
 
 ## Protect / expendable
 

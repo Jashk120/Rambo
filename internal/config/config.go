@@ -56,11 +56,12 @@ type KillWeights struct {
 }
 
 type Kill struct {
-	Policy    string      `toml:"policy"`
-	Cooldown  string      `toml:"cooldown"`
-	MaxPerMin int         `toml:"max_per_min"`
-	Weights   KillWeights `toml:"weights"`
-	OOMPrefer bool        `toml:"oom_prefer"`
+	Policy     string      `toml:"policy"`
+	Cooldown   string      `toml:"cooldown"`
+	MaxPerMin  int         `toml:"max_per_min"`
+	Weights    KillWeights `toml:"weights"`
+	OOMPrefer  bool        `toml:"oom_prefer"`
+	OOMProtect bool        `toml:"oom_protect"`
 }
 
 type Battery struct {
@@ -93,8 +94,9 @@ func Default() Config {
 		Disk:        Disk{SpaceAlertPct: 90, IOAlert: true, Action: "notify"},
 		Kill: Kill{
 			Policy: "score", Cooldown: "30s", MaxPerMin: 3,
-			Weights:   KillWeights{RSS: 0.6, CPU: 0.3, Runtime: 0.1},
-			OOMPrefer: true,
+			Weights:    KillWeights{RSS: 0.6, CPU: 0.3, Runtime: 0.1},
+			OOMPrefer:  true,
+			OOMProtect: true,
 		},
 		Battery: Battery{LowPct: 20, Action: "suspend"},
 	}
@@ -103,6 +105,24 @@ func Default() Config {
 func Path() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "rambo", "config.toml")
+}
+
+// LoadFrom reads a rambo TOML config from an explicit path, returning defaults
+// (never writing) when the file is absent. Used by the privileged oom-protect
+// helper to read the real user's config without touching their home.
+func LoadFrom(path string) (Config, error) {
+	cfg := Default()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
 }
 
 func oldJSONPath() string {

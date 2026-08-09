@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -98,6 +100,27 @@ func runDaemon() error {
 		}()
 	}
 
+	if cfg.Kill.OOMProtect {
+		if err := oom.ProtectSelf(); err != nil {
+			fmt.Printf("[rambo] oom-protect: cannot self-protect (unprivileged): %v\n", err)
+		} else {
+			fmt.Println("[rambo] oom-protect: self oom_score_adj=-1000")
+		}
+		runOOMProtectHelper()
+		protectTicker := time.NewTicker(5 * time.Minute)
+		defer protectTicker.Stop()
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-protectTicker.C:
+					runOOMProtectHelper()
+				}
+			}
+		}()
+	}
+
 	fmt.Printf("[rambo] daemon started — soft %.0f%% (%.1fG) | hard %.0f%% (%.1fG) | max %.0f%% (%.1fG) | temp kill %.0fC\n",
 		cfg.Memory.SoftPct, gbpct(totalKB, cfg.Memory.SoftPct),
 		cfg.Memory.HardPct, gbpct(totalKB, cfg.Memory.HardPct),
@@ -167,6 +190,38 @@ func runDaemon() error {
 			return nil
 		}
 	}
+}
+
+// runOOMProtectHelper invokes the privileged `rambo oom-protect` helper once,
+// in the background, so the kernel OOM killer is kept away from protected
+// processes. The helper only adjusts oom_score_adj and never kills. Any failure
+// (no pkexec, no polkit rule, prompt declined) is logged and ignored — the
+// daemon keeps running unprivileged and never blocks on it.
+func runOOMProtectHelper() {
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Printf("[rambo] oom-protect: cannot locate rambo binary: %v\n", err)
+		return
+	}
+	if _, err := exec.LookPath("pkexec"); err != nil {
+		fmt.Println("[rambo] oom-protect: pkexec not found — kernel OOM protection off")
+		return
+	}
+	cmd := exec.Command("pkexec", exe, "oom-protect")
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Start(); err != nil {
+		fmt.Printf("[rambo] oom-protect: pkexec failed to start: %v\n", err)
+		return
+	}
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			fmt.Printf("[rambo] oom-protect: helper failed: %v\n%s", err, strings.TrimSpace(buf.String()))
+		} else if buf.Len() > 0 {
+			fmt.Printf("[rambo] %s\n", strings.TrimSpace(buf.String()))
+		}
+	}()
 }
 
 func handleEvent(cfg config.Config, coord *kill.Coordinator, oomMgr *oom.Manager, ev watcher.Event) {
