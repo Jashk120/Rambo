@@ -23,17 +23,63 @@ All watchers are kernel-backed or kernel-accounted:
 | Disk | `statfs` + `/proc/diskstats` | space%, pathological I/O |
 | Battery | `power_supply` (laptops only) | low charge → suspend heavy jobs |
 
-## Build
+## Install
+
+### From packages (recommended)
+
+**Arch Linux (AUR)**
+```sh
+paru -S rambo
+# or
+yay -S rambo
+# or manually
+git clone https://aur.archlinux.org/rambo.git
+cd rambo && makepkg -si
+```
+
+**Debian / Ubuntu (.deb)**
+```sh
+# Download from Releases: https://github.com/Jashk120/Rambo/releases
+sudo apt install ./rambo_0.1.0_linux_amd64.deb
+```
+
+**Fedora / RHEL / openSUSE (.rpm)**
+```sh
+sudo dnf install ./rambo_0.1.0_linux_amd64.rpm
+# or on openSUSE
+sudo zypper install ./rambo_0.1.0_linux_amd64.rpm
+```
+
+**Alpine (.apk)**
+```sh
+apk add --allow-untrusted rambo_0.1.0_linux_amd64.apk
+```
+
+**Homebrew (Linux/macOS)**
+```sh
+brew tap Jashk120/rambo
+brew install rambo
+```
+
+**Generic tarball**
+```sh
+tar xzf rambo_0.1.0_linux_amd64.tar.gz
+sudo install -Dm755 rambo /usr/bin/rambo
+sudo install -Dm644 polkit/99-rambo.rules /usr/share/polkit-1/rules.d/99-rambo.rules
+sudo install -Dm644 systemd/rambo.service /usr/lib/systemd/user/rambo.service
+```
+
+### From source
 
 ```sh
 go build -o rambo .
+sudo make install
+# installs: binary, polkit rule, systemd user service, man page, completions, license
 ```
 
-Optional user install:
-
+Or run unprivileged without installing:
 ```sh
-mkdir -p ~/.local/bin
-cp ./rambo ~/.local/bin/rambo
+./rambo daemon
 ```
 
 ## Commands
@@ -156,12 +202,16 @@ Caveat: once a process is marked `1000` it stays marked for the process lifetime
 
 The daemon itself stays unprivileged — only a narrow helper runs as root. With `kill.oom_protect = true` (default), the daemon invokes `pkexec rambo oom-protect` on start and every 5 minutes. That helper sets `oom_score_adj = -1000` (unkillable by the kernel OOM killer) on the internal blacklist, the `protect` list, and rambo itself. It only writes `oom_score_adj`; it never kills, so running it as root carries no kill blast radius.
 
-To let the passwordless helper through, install the polkit rule once (as root):
+To let the passwordless helper through, install once (as root):
 
 ```sh
-sudo cp polkit/99-rambo.rules /etc/polkit-1/rules.d/
-sudo systemctl restart polkit   # or reboot; not required on all distros
-systemctl --user restart rambo.service
+sudo make install
+```
+
+This installs the binary to `/usr/bin/rambo`, the polkit rule to `/usr/share/polkit-1/rules.d/99-rambo.rules`, and the systemd user service to `/usr/lib/systemd/user/rambo.service`. On Arch, `makepkg -si` (or the AUR) does the same. The rule is machine-wide — every user on the system gets passwordless `rambo oom-protect` with no per-user step.
+
+```sh
+systemctl --user enable --now rambo.service
 ```
 
 The rule matches only the exact `rambo oom-protect` invocation (`program` basename `rambo` + first argument `oom-protect`) and grants nothing else.
@@ -196,7 +246,13 @@ rambo history --source temperature --n 50
 
 ## Run with systemd
 
-A user service template is included at `systemd/rambo.service`.
+A user service template is included at `systemd/rambo.service`. It is installed automatically to `/usr/lib/systemd/user/rambo.service` by `sudo make install` (or the package); enable it with:
+
+```sh
+systemctl --user enable --now rambo.service
+```
+
+For a manual install without `make install`, copy it to your user unit dir:
 
 ```sh
 mkdir -p ~/.config/systemd/user

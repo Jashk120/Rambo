@@ -1,0 +1,31 @@
+# Binaries
+/rambo
+/rambo-*.tar.gz
+/dist/
+
+# Go build cache
+/vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Packaging artifacts
+*.pkg.tar.zst
+*.deb
+*.rpm
+*.apk
+/src/
+/pkg/
+completions/
+man/
+*.tar.gz
+
+# Local dev
+.env

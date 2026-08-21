@@ -1,12 +1,22 @@
 [Unit]
-Description=Rambo RAM monitor daemon
+Description=Rambo — kernel-backed RAM monitor and OOM daemon
+Documentation=https://github.com/jashk120/rambo
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/%u/.local/bin/rambo daemon
+ExecStart=/usr/bin/rambo daemon
 Restart=on-failure
 RestartSec=5
+# Hardening (user service — keep minimal, no NoNewPrivileges that would break pkexec)
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/rambo %h/.local/share/rambo %h/.local/state/rambo
+ProtectControlGroups=false
+ProtectKernelTunables=false
 
 [Install]
 WantedBy=default.target

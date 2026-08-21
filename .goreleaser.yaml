@@ -1,0 +1,214 @@
+# GoReleaser config for rambo — builds and publishes to multiple package managers
+# Usage:
+#   goreleaser check
+#   goreleaser release --clean              # on a tagged commit
+#   goreleaser release --snapshot --clean   # local snapshot without publishing
+version: 2
+
+project_name: rambo
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: rambo
+    main: .
+    binary: rambo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+      - "386"
+      - arm
+    goarm:
+      - "6"
+      - "7"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/jashk120/rambo/internal/version.Version={{.Version}} -X github.com/jashk120/rambo/internal/version.Commit={{.Commit}} -X github.com/jashk120/rambo/internal/version.Date={{.Date}}
+
+archives:
+  - id: tarball
+    builds:
+      - rambo
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
+    formats: ["tar.gz"]
+    files:
+      - README.md
+      - LICENSE
+      - docs/rambo.1
+      - polkit/99-rambo.rules
+      - systemd/rambo.service
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+nfpms:
+  # deb
+  - id: deb
+    builds:
+      - rambo
+    vendor: Jashk120
+    homepage: https://github.com/Jashk120/Rambo
+    description: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+    maintainer: Jashk120 <jashk120@example.com>
+    license: MIT
+    formats:
+      - deb
+    bindir: /usr/bin
+    contents:
+      - src: ./polkit/99-rambo.rules
+        dst: /usr/share/polkit-1/rules.d/99-rambo.rules
+        file_info:
+          mode: 0644
+      - src: ./systemd/rambo.service
+        dst: /usr/lib/systemd/user/rambo.service
+        file_info:
+          mode: 0644
+      - src: ./docs/rambo.1
+        dst: /usr/share/man/man1/rambo.1
+        file_info:
+          mode: 0644
+      - src: ./LICENSE
+        dst: /usr/share/licenses/rambo/LICENSE
+        file_info:
+          mode: 0644
+      - src: ./README.md
+        dst: /usr/share/doc/rambo/README.md
+        file_info:
+          mode: 0644
+    deb:
+      summary: Kernel-backed RAM monitor and OOM daemon
+      depends:
+        - polkit
+
+  # rpm
+  - id: rpm
+    builds:
+      - rambo
+    vendor: Jashk120
+    homepage: https://github.com/Jashk120/Rambo
+    description: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+    maintainer: Jashk120 <jashk120@example.com>
+    license: MIT
+    formats:
+      - rpm
+    bindir: /usr/bin
+    contents:
+      - src: ./polkit/99-rambo.rules
+        dst: /usr/share/polkit-1/rules.d/99-rambo.rules
+      - src: ./systemd/rambo.service
+        dst: /usr/lib/systemd/user/rambo.service
+      - src: ./docs/rambo.1
+        dst: /usr/share/man/man1/rambo.1
+      - src: ./LICENSE
+        dst: /usr/share/licenses/rambo/LICENSE
+      - src: ./README.md
+        dst: /usr/share/doc/rambo/README.md
+    rpm:
+      summary: Kernel-backed RAM monitor and OOM daemon
+      group: System Environment/Daemons
+      depends:
+        - polkit
+
+  # apk (Alpine)
+  - id: apk
+    builds:
+      - rambo
+    vendor: Jashk120
+    homepage: https://github.com/Jashk120/Rambo
+    description: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+    maintainer: Jashk120 <jashk120@example.com>
+    license: MIT
+    formats:
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: ./polkit/99-rambo.rules
+        dst: /usr/share/polkit-1/rules.d/99-rambo.rules
+      - src: ./systemd/rambo.service
+        dst: /usr/lib/systemd/user/rambo.service
+      - src: ./docs/rambo.1
+        dst: /usr/share/man/man1/rambo.1
+      - src: ./LICENSE
+        dst: /usr/share/licenses/rambo/LICENSE
+    apk:
+      summary: Kernel-backed RAM monitor and OOM daemon
+      depends:
+        - polkit
+
+  # archlinux (pacman)
+  - id: arch
+    builds:
+      - rambo
+    vendor: Jashk120
+    homepage: https://github.com/Jashk120/Rambo
+    description: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+    maintainer: Jashk120 <jashk120@example.com>
+    license: MIT
+    formats:
+      - archlinux
+    bindir: /usr/bin
+    contents:
+      - src: ./polkit/99-rambo.rules
+        dst: /usr/share/polkit-1/rules.d/99-rambo.rules
+      - src: ./systemd/rambo.service
+        dst: /usr/lib/systemd/user/rambo.service
+      - src: ./docs/rambo.1
+        dst: /usr/share/man/man1/rambo.1
+      - src: ./LICENSE
+        dst: /usr/share/licenses/rambo/LICENSE
+    archlinux:
+      pkgdesc: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+      depends:
+        - polkit
+
+brews:
+  - id: rambo
+    repository:
+      owner: Jashk120
+      name: homebrew-rambo
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    branch: main
+    folder: Formula
+    homepage: https://github.com/Jashk120/Rambo
+    description: "Kernel-backed, policy-driven RAM monitor and OOM killer daemon"
+    license: MIT
+    test: |
+      system "#{bin}/rambo", "version"
+    install: |
+      bin.install "rambo"
+      (share/"polkit-1/rules.d").install "polkit/99-rambo.rules"
+      (lib/"systemd/user").install "systemd/rambo.service"
+      man1.install "docs/rambo.1"
+      generate_completions_from_executable(bin/"rambo", shell: true)
+
+aurs:
+  - id: rambo
+    commit_author:
+      name: Jashk120
+      email: jashk120@example.com
+    description: Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+    homepage: https://github.com/Jashk120/Rambo
+    license: MIT
+    maintainers:
+      - "Jashk120 <jashk120@example.com>"
+    private_key: "{{ .Env.AUR_KEY }}"
+
+# Sign artifacts (optional — requires GPG)
+#signs:
+#  - artifacts: checksum
+#    args: ["--batch", "-u", "{{ .Env.GPG_FINGERPRINT }}", "--output", "${signature}", "--detach-sign", "${artifact}"]

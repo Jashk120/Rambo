@@ -1,0 +1,18 @@
+pkgbase = rambo
+	pkgdesc = Kernel-backed, policy-driven RAM monitor and OOM killer daemon
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/Jashk120/Rambo
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = go
+	depends = polkit
+	optdepends = libnotify: desktop notifications
+	optdepends = systemd: user service
+	provides = rambo
+	conflicts = rambo-git
+	source = rambo-0.1.0.tar.gz::https://github.com/Jashk120/Rambo/archive/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = rambo

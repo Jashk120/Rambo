@@ -1,0 +1,101 @@
+.TH RAMBO 1 "2026-08-21" "rambo 0.1.0" "User Commands"
+.SH NAME
+rambo \- kernel-backed, policy-driven RAM monitor and OOM killer daemon
+.SH SYNOPSIS
+.B rambo
+[\fICOMMAND\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+Rambo is an event-driven, kernel-backed system monitor for Linux. It watches
+RAM (via cgroup v2 limits), temperature (hwmon), pressure (PSI), network
+(netlink), CPU and disk, then acts on configurable policies: desktop
+notifications, graceful SIGTERM to a score-picked process, or suspending heavy
+jobs.
+.PP
+Detection (watchers) is separated from policy (a config-driven engine), so
+adding a sensor or changing behaviour never requires touching daemon logic.
+.SH COMMANDS
+.TP
+.B daemon
+Run the monitor (event loop) in the foreground. This is what the systemd user
+service executes.
+.TP
+.B top
+One-shot view of system stats and top RAM consumers.
+.TP
+.B stats
+Live dashboard (Ctrl+C to exit).
+.TP
+.B threshold set
+Set memory thresholds and alert levels. See \fBthreshold\fR help.
+.TP
+.B threshold status
+Show current thresholds.
+.TP
+.B protect add --name <name>
+Protect a process name from being killed.
+.TP
+.B protect remove --name <name>
+Remove a process name from the protect list.
+.TP
+.B protect list
+List protected process names.
+.TP
+.B oom-protect
+Privileged helper (via pkexec): set oom_score_adj=-1000 on protected processes.
+Normally invoked automatically by the daemon; not intended for manual use.
+.TP
+.B history
+Show past events and kills with reasons.
+.TP
+.B clean
+Delete the log file.
+.TP
+.B version
+Print version information.
+.TP
+.B completion [bash|zsh|fish|powershell]
+Generate shell completion script.
+.SH FILES
+.TP
+.I ~/.config/rambo/config.toml
+Main configuration file. See \fBREADME.md\fR for all options.
+.TP
+.I ~/.local/state/rambo/state.json
+Event and kill history (last 500 records).
+.TP
+.I ~/.local/share/rambo/rambo.log
+Kill log and notification fallback.
+.TP
+.I /usr/share/polkit-1/rules.d/99-rambo.rules
+Polkit rule allowing passwordless \fBrambo oom-protect\fR via pkexec.
+.TP
+.I /usr/lib/systemd/user/rambo.service
+Systemd user service unit.
+.SH CONFIGURATION
+Configuration lives at \fI~/.config/rambo/config.toml\fR and is created with
+sensible defaults on first run. It migrates automatically from the legacy
+\fIconfig.json\fR if present.
+.PP
+See \fBhttps://github.com/jashk120/rambo#configuration\fR for a full example.
+.SH SYSTEMD
+Enable and start the daemon:
+.PP
+.nf
+systemctl --user enable --now rambo.service
+journalctl --user -u rambo -f
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Successful execution.
+.TP
+.B non-zero
+Error.
+.SH AUTHOR
+Written by Jashk120 <https://github.com/jashk120/rambo>.
+.SH LICENSE
+MIT
+.SH SEE ALSO
+.BR systemd (1),
+.BR polkit (8),
+.BR cgroup (7)

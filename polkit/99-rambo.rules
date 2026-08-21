@@ -2,12 +2,16 @@
 // pkexec. The rule matches only the `rambo oom-protect` invocation, so it
 // grants nothing else. The helper only writes oom_score_adj=-1000 on
 // protected processes; it never kills.
+//
+// pkexec exposes the requested command as the "program" and "command_line"
+// details (there is no "arguments" detail), where command_line is the full
+// command joined from argv, e.g. "/usr/bin/rambo oom-protect".
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.policykit.exec") {
         var program = action.lookup("program");
-        var args = action.lookup("arguments");
+        var cmdline = action.lookup("command_line");
         if (program && program.split("/").pop() == "rambo" &&
-            args && args.split(" ")[0] == "oom-protect") {
+            cmdline && cmdline.split(" ")[1] == "oom-protect") {
             return polkit.Result.YES;
         }
     }
